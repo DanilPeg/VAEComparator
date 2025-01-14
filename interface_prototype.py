@@ -6,18 +6,30 @@ from PIL import Image
 import numpy as np
 
 class ImageComparator(QMainWindow):
+    """
+    Основной класс приложения для сравнения изображений.
+
+    Позволяет загружать два изображения, выбирать метрику для их сравнения
+    и вычислять значение метрики.
+    """
     def __init__(self):
+        """
+        Инициализирует окно приложения и основные компоненты интерфейса.
+        """
         super().__init__()
 
         self.setWindowTitle('VAEComparator-test')
         self.setGeometry(100, 100, 800, 600)
 
-        self.image1 = None
-        self.image2 = None
+        self.image1 = None  
+        self.image2 = None  
 
         self.init_ui()
 
     def init_ui(self):
+        """
+        Создаёт пользовательский интерфейс приложения.
+        """
         layout = QVBoxLayout()
 
         image_layout = QHBoxLayout()
@@ -64,6 +76,10 @@ class ImageComparator(QMainWindow):
         self.setCentralWidget(container)
 
     def load_image1(self):
+        """
+        Загружает первое изображение с помощью диалогового окна
+        и отображает его в интерфейсе.
+        """
         file_dialog = QFileDialog(self)
         file_dialog.setFileMode(QFileDialog.ExistingFiles)
         file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp)")
@@ -73,6 +89,10 @@ class ImageComparator(QMainWindow):
             self.image1 = np.array(Image.open(image_path))
 
     def load_image2(self):
+        """
+        Загружает второе изображение с помощью диалогового окна
+        и отображает его в интерфейсе.
+        """
         file_dialog = QFileDialog(self)
         file_dialog.setFileMode(QFileDialog.ExistingFiles)
         file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp)")
@@ -82,18 +102,32 @@ class ImageComparator(QMainWindow):
             self.image2 = np.array(Image.open(image_path))
 
     def display_image(self, image_path, label):
+        """
+        Отображает изображение в заданной метке интерфейса.
+
+        Args:
+            image_path (str): Путь к изображению.
+            label (QLabel): Метка, в которой будет отображено изображение.
+        """
         pixmap = QPixmap(image_path)
         pixmap = pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(pixmap)
 
     def compute_metric(self):
+        """
+        Вычисляет метрику близости между двумя изображениями,
+        если они оба загружены.
+        """
         if self.image1 is not None and self.image2 is not None:
-            metric_value = np.random.rand() 
+            metric_value = np.random.rand()  # Заглушка для метрики
             self.metric_value_label.setText(f"Метрика близости: {metric_value:.4f}")
         else:
             self.metric_value_label.setText("Загрузите оба изображения")
 
 if __name__ == "__main__":
+    """
+    Точка входа в приложение. Создаёт экземпляр приложения и запускает его.
+    """
     app = QApplication(sys.argv)
     window = ImageComparator()
     window.show()
