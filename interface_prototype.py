@@ -1,219 +1,352 @@
 # interface_prototype.py
 import sys
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QLabel, QPushButton, QFileDialog, QFrame)
-from PyQt5.QtGui import QPixmap, QFont
+import os
+import glob
+import numpy as np
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QLabel, QFileDialog,
+                             QHBoxLayout, QGroupBox, QCheckBox, QTextEdit, QScrollArea)
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
 from PIL import Image
-import numpy as np
 import torch
 import torchvision.transforms as transforms
-from model_VAE import ContrastiveVAE
+from model_AE import ResidualAutoEncoder, get_embedding
+from skimage.metrics import structural_similarity as ssim
+import cv2
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-latent_dim = 128
-projection_dim = 64
+def cosine_similarity(vec1, vec2):
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-8)
 
-class СравнениеИзображений(QMainWindow):
+def manhattan_distance(vec1, vec2):
+    return np.sum(np.abs(vec1 - vec2))
+
+def pearson_correlation(vec1, vec2):
+    if np.std(vec1)==0 or np.std(vec2)==0:
+        return 0.0
+    return np.corrcoef(vec1, vec2)[0, 1]
+
+def mse_metric(img1, img2):
+    return np.mean((img1.astype("float") - img2.astype("float")) ** 2)
+
+def ssim_metric(img1, img2):
+    if len(img1.shape) == 3:
+        img1_gray = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+    else:
+        img1_gray = img1
+    if len(img2.shape) == 3:
+        img2_gray = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+    else:
+        img2_gray = img2
+    score, _ = ssim(img1_gray, img2_gray, full=True, data_range=255)
+    return score
+
+def histogram_intersection(img1, img2):
+    if len(img1.shape) == 3:
+        img1_gray = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+    else:
+        img1_gray = img1
+    if len(img2.shape) == 3:
+        img2_gray = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
+    else:
+        img2_gray = img2
+    hist1 = cv2.calcHist([img1_gray], [0], None, [256], [0, 256])
+    hist2 = cv2.calcHist([img2_gray], [0], None, [256], [0, 256])
+    hist1 = hist1 / np.sum(hist1)
+    hist2 = hist2 / np.sum(hist2)
+    intersection = np.sum(np.minimum(hist1, hist2))
+    return float(intersection)
+
+class ImageComparator(QMainWindow):
+    """
+    Основной класс приложения для сравнения изображений.
+    Позволяет загружать два изображения, выбирать метрики для их сравнения,
+    вычислять метрики, а также находить топ-3 похожих изображения из папки images.
+    """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Сравнение изображений")
-        self.setGeometry(100, 100, 1000, 800)
+        self.setWindowTitle('AEComparator')
+        self.setGeometry(100, 100, 1200, 800)
         self.image1 = None
         self.image2 = None
-        self.image1_path = None
-        self.image2_path = None
+        self.image1_np = None  # Для метрик без нейросети
+        self.image2_np = None
+        self.model = None
         self.init_model()
         self.init_ui()
-
+        
     def init_model(self):
-        self.model = ContrastiveVAE(latent_dim, projection_dim).to(device)
-        model_path = "models/contrastive_vae_cifar100.pth"
+        """
+        Загружает обученную модель автоэнкодера.
+        """
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = ResidualAutoEncoder().to(device)
         try:
-            self.model.load_state_dict(torch.load(model_path, map_location=device))
-            print("Модель загружена.")
+            self.model.load_state_dict(torch.load("ae_model.pth", map_location=device))
+            self.model.eval()
         except Exception as e:
-            print("Ошибка при загрузке модели:", e)
-        self.model.eval()
+            print("Не удалось загрузить модель ae_model.pth. Убедитесь, что модель обучена.")
+            self.model = None
 
     def init_ui(self):
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(20)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-
-        # Заголовок
-        title_label = QLabel("Сравнение изображений")
-        title_font = QFont("Arial", 24, QFont.Bold)
-        title_label.setFont(title_font)
-        title_label.setAlignment(Qt.AlignCenter)
-        main_layout.addWidget(title_label)
-
-        # Блок для отображения изображений
-        img_layout = QHBoxLayout()
-        # Изображение 1
-        vbox1 = QVBoxLayout()
-        self.img1_label = QLabel("Изображение 1")
-        self.img1_label.setAlignment(Qt.AlignCenter)
-        self.img1_display = QLabel()
-        self.img1_display.setFixedSize(300, 300)
-        self.img1_display.setStyleSheet("border: 2px solid #000;")
-        vbox1.addWidget(self.img1_label)
-        vbox1.addWidget(self.img1_display)
-        # Изображение 2
-        vbox2 = QVBoxLayout()
-        self.img2_label = QLabel("Изображение 2")
-        self.img2_label.setAlignment(Qt.AlignCenter)
-        self.img2_display = QLabel()
-        self.img2_display.setFixedSize(300, 300)
-        self.img2_display.setStyleSheet("border: 2px solid #000;")
-        vbox2.addWidget(self.img2_label)
-        vbox2.addWidget(self.img2_display)
-        img_layout.addLayout(vbox1)
-        img_layout.addLayout(vbox2)
-        main_layout.addLayout(img_layout)
-
-        # Кнопки загрузки изображений
-        btn_layout = QHBoxLayout()
-        load_btn1 = QPushButton("Загрузить изображение 1")
-        load_btn1.setFont(QFont("Arial", 14))
-        load_btn1.clicked.connect(self.load_image1)
-        load_btn2 = QPushButton("Загрузить изображение 2")
-        load_btn2.setFont(QFont("Arial", 14))
-        load_btn2.clicked.connect(self.load_image2)
-        btn_layout.addWidget(load_btn1)
-        btn_layout.addWidget(load_btn2)
-        main_layout.addLayout(btn_layout)
-
-        # Кнопка для вычисления сходства
-        compute_btn = QPushButton("Вычислить сходство")
-        compute_btn.setFont(QFont("Arial", 16, QFont.Bold))
-        compute_btn.clicked.connect(self.compute_similarity)
-        main_layout.addWidget(compute_btn)
-
-        # Отображение результатов
-        self.results_label = QLabel("")
-        self.results_label.setFont(QFont("Arial", 16))
-        self.results_label.setAlignment(Qt.AlignCenter)
-        self.results_label.setWordWrap(True)
-        main_layout.addWidget(self.results_label)
-
-        # Легенда для индикаторов сходства с цветными блоками внутри которых размещены надписи
-        legend = QLabel()
-        legend.setFont(QFont("Arial", 14))
-        legend.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        legend.setText(
-            "<b>Легенда для индикаторов сходства:</b><br>"
-            "<span style='background-color:#00cc00; color:#000; padding:4px 20px; display:inline-block;'>Высокое сходство</span><br>"
-            "<span style='background-color:#99ff99; color:#000; padding:4px 20px; display:inline-block;'>Умеренное сходство</span><br>"
-            "<span style='background-color:#ffff66; color:#000; padding:4px 20px; display:inline-block;'>Низкое сходство</span><br>"
-            "<span style='background-color:#ff6666; color:#000; padding:4px 20px; display:inline-block;'>Нет сходства</span>"
-        )
-        legend.setAlignment(Qt.AlignLeft)
-        main_layout.addWidget(legend)
-
+        
+        # Раздел для отображения изображений
+        image_layout = QHBoxLayout()
+        self.image1_display = QLabel("Изображение 1")
+        self.image1_display.setFixedSize(256, 256)
+        self.image1_display.setAlignment(Qt.AlignCenter)
+        
+        self.image2_display = QLabel("Изображение 2")
+        self.image2_display.setFixedSize(256, 256)
+        self.image2_display.setAlignment(Qt.AlignCenter)
+        
+        image_layout.addWidget(self.image1_display)
+        image_layout.addWidget(self.image2_display)
+        
+        load_button_layout = QHBoxLayout()
+        load_button1 = QPushButton("Загрузить изображение 1")
+        load_button1.clicked.connect(self.load_image1)
+        load_button2 = QPushButton("Загрузить изображение 2")
+        load_button2.clicked.connect(self.load_image2)
+        load_button_layout.addWidget(load_button1)
+        load_button_layout.addWidget(load_button2)
+        
+        self.embedding_metrics_group = QGroupBox("Метрики на основе эмбеддингов (НС)")
+        emb_layout = QVBoxLayout()
+        self.cb_cosine = QCheckBox("Косинусное сходство")
+        self.cb_manhattan = QCheckBox("Манхэттенское расстояние")
+        self.cb_pearson = QCheckBox("Корреляция Пирсона")
+        # По умолчанию выбираем все
+        self.cb_cosine.setChecked(True)
+        self.cb_manhattan.setChecked(True)
+        self.cb_pearson.setChecked(True)
+        emb_layout.addWidget(self.cb_cosine)
+        emb_layout.addWidget(self.cb_manhattan)
+        emb_layout.addWidget(self.cb_pearson)
+        self.embedding_metrics_group.setLayout(emb_layout)
+        
+        self.image_metrics_group = QGroupBox("Метрики на основе изображений (без НС)")
+        img_layout = QVBoxLayout()
+        self.cb_mse = QCheckBox("Среднеквадратичная ошибка (MSE)")
+        self.cb_ssim = QCheckBox("SSIM")
+        self.cb_hist = QCheckBox("Гистограммное пересечение")
+        self.cb_mse.setChecked(True)
+        self.cb_ssim.setChecked(True)
+        self.cb_hist.setChecked(True)
+        img_layout.addWidget(self.cb_mse)
+        img_layout.addWidget(self.cb_ssim)
+        img_layout.addWidget(self.cb_hist)
+        self.image_metrics_group.setLayout(img_layout)
+        
+        compute_button = QPushButton("Вычислить метрики")
+        compute_button.clicked.connect(self.compute_metrics)
+        
+        self.results_display = QTextEdit()
+        self.results_display.setReadOnly(True)
+        
+        similar_button = QPushButton("Найти похожие изображения (топ-3)")
+        similar_button.clicked.connect(self.find_similar_images)
+        
+        self.similar_vector_group = QGroupBox("Топ-3 по косинусному сходству")
+        self.similar_vector_layout = QHBoxLayout()
+        self.similar_vector_group.setLayout(self.similar_vector_layout)
+        
+        self.similar_ssim_group = QGroupBox("Топ-3 по SSIM")
+        self.similar_ssim_layout = QHBoxLayout()
+        self.similar_ssim_group.setLayout(self.similar_ssim_layout)
+        
+        main_layout.addLayout(image_layout)
+        main_layout.addLayout(load_button_layout)
+        main_layout.addWidget(self.embedding_metrics_group)
+        main_layout.addWidget(self.image_metrics_group)
+        main_layout.addWidget(compute_button)
+        main_layout.addWidget(self.results_display)
+        main_layout.addWidget(similar_button)
+        main_layout.addWidget(self.similar_vector_group)
+        main_layout.addWidget(self.similar_ssim_group)
+        
         container = QWidget()
         container.setLayout(main_layout)
-        self.setCentralWidget(container)
-
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #f8f8f8;
-            }
-            QPushButton {
-                background-color: #007ACC;
-                color: white;
-                padding: 10px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #005F99;
-            }
-            QLabel {
-                color: #333;
-            }
-        """)
-
+        scroll = QScrollArea()
+        scroll.setWidget(container)
+        scroll.setWidgetResizable(True)
+        self.setCentralWidget(scroll)
+        
     def load_image1(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Выберите изображение 1", "", "Изображения (*.png *.jpg *.jpeg *.bmp)")
-        if file_name:
-            self.image1_path = file_name
-            self.image1 = Image.open(file_name).convert("RGB")
-            pixmap = QPixmap(file_name).scaled(self.img1_display.width(), self.img1_display.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.img1_display.setPixmap(pixmap)
-
+        file_dialog = QFileDialog(self)
+        file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp)")
+        if file_dialog.exec_():
+            image_path = file_dialog.selectedFiles()[0]
+            self.display_image(image_path, self.image1_display)
+            self.image1 = image_path
+            self.image1_np = np.array(Image.open(image_path).convert("RGB"))
+            
     def load_image2(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Выберите изображение 2", "", "Изображения (*.png *.jpg *.jpeg *.bmp)")
-        if file_name:
-            self.image2_path = file_name
-            self.image2 = Image.open(file_name).convert("RGB")
-            pixmap = QPixmap(file_name).scaled(self.img2_display.width(), self.img2_display.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.img2_display.setPixmap(pixmap)
-
-    def preprocess_image(self, image):
-        transform = transforms.Compose([
-            transforms.Resize((32, 32)),
-            transforms.ToTensor(),
-        ])
-        return transform(image).unsqueeze(0).to(device)
-
-    def get_indicator_color(self, metric, value):
-        # Пороговые значения для нормализованных эмбеддингов:
-        if metric == "euclidean":
-            if value < 0.6:
-                return "#00cc00"  # Высокое сходство
-            elif value < 1.0:
-                return "#99ff99"  # Умеренное сходство
-            elif value < 1.4:
-                return "#ffff66"  # Низкое сходство
-            else:
-                return "#ff6666"  # Нет сходства
-        elif metric == "cosine":
-            if value > 0.9:
-                return "#00cc00"  # Высокое сходство
-            elif value > 0.8:
-                return "#99ff99"  # Умеренное сходство
-            elif value > 0.7:
-                return "#ffff66"  # Низкое сходство
-            else:
-                return "#ff6666"  # Нет сходства
-        elif metric == "manhattan":
-            if value < 0.8:
-                return "#00cc00"
-            elif value < 1.2:
-                return "#99ff99"
-            elif value < 1.6:
-                return "#ffff66"
-            else:
-                return "#ff6666"
-        else:
-            return "#cccccc"
-
-    def compute_similarity(self):
+        file_dialog = QFileDialog(self)
+        file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.bmp)")
+        if file_dialog.exec_():
+            image_path = file_dialog.selectedFiles()[0]
+            self.display_image(image_path, self.image2_display)
+            self.image2 = image_path
+            self.image2_np = np.array(Image.open(image_path).convert("RGB"))
+            
+    def display_image(self, image_path, label):
+        pixmap = QPixmap(image_path)
+        pixmap = pixmap.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(pixmap)
+        
+    def compute_metrics(self):
         if self.image1 is None or self.image2 is None:
-            self.results_label.setText("Пожалуйста, загрузите оба изображения.")
+            self.results_display.setText("Пожалуйста, загрузите оба изображения.")
             return
-        img1_tensor = self.preprocess_image(self.image1)
-        img2_tensor = self.preprocess_image(self.image2)
-        with torch.no_grad():
-            emb1 = self.model.get_embedding(img1_tensor).cpu().numpy().flatten()
-            emb2 = self.model.get_embedding(img2_tensor).cpu().numpy().flatten()
-        euclidean = np.linalg.norm(emb1 - emb2)
-        cosine_similarity = np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2) + 1e-10)
-        manhattan = np.sum(np.abs(emb1 - emb2))
-        color_euc = self.get_indicator_color("euclidean", euclidean)
-        color_cos = self.get_indicator_color("cosine", cosine_similarity)
-        color_man = self.get_indicator_color("manhattan", manhattan)
-        result_html = f"""
-        <div style='text-align:center;'>
-            <span style='background-color:{color_euc}; padding:8px; margin:4px;'>Евклидово расстояние: {euclidean:.4f}</span><br>
-            <span style='background-color:{color_cos}; padding:8px; margin:4px;'>Косинусная схожесть: {cosine_similarity:.4f}</span><br>
-            <span style='background-color:{color_man}; padding:8px; margin:4px;'>Манхэттенское расстояние: {manhattan:.4f}</span>
-        </div>
+        
+        results = ""
+        
+        
+        transform_emb = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor()
+        ])
+        img1_tensor = transform_emb(Image.open(self.image1).convert("RGB"))
+        img2_tensor = transform_emb(Image.open(self.image2).convert("RGB"))
+        
+        if self.model is not None:
+            embedding1 = get_embedding(self.model, img1_tensor)
+            embedding2 = get_embedding(self.model, img2_tensor)
+            emb1 = embedding1.cpu().numpy()
+            emb2 = embedding2.cpu().numpy()
+            
+            results += "Метрики на основе эмбеддингов (НС):\n"
+            if self.cb_cosine.isChecked():
+                cos_sim = cosine_similarity(emb1, emb2)
+                results += f"Косинусное сходство: {cos_sim:.4f}\n"
+            if self.cb_manhattan.isChecked():
+                manh = manhattan_distance(emb1, emb2)
+                results += f"Манхэттенское расстояние: {manh:.4f}\n"
+            if self.cb_pearson.isChecked():
+                corr = pearson_correlation(emb1, emb2)
+                results += f"Корреляция Пирсона: {corr:.4f}\n"
+            results += "\n"
+        else:
+            results += "Модель автоэнкодера не загружена. Метрики на основе эмбеддингов недоступны.\n\n"
+        
+        img1 = np.array(Image.open(self.image1).resize((256,256))).astype(np.float32)
+        img2 = np.array(Image.open(self.image2).resize((256,256))).astype(np.float32)
+        
+        results += "Метрики на основе изображений (без НС):\n"
+        if self.cb_mse.isChecked():
+            mse_val = mse_metric(img1, img2)
+            results += f"MSE: {mse_val:.4f}\n"
+        if self.cb_ssim.isChecked():
+            ssim_val = ssim_metric(img1, img2)
+            results += f"SSIM: {ssim_val:.4f}\n"
+        if self.cb_hist.isChecked():
+            hist_int = histogram_intersection(img1, img2)
+            results += f"Гистограммное пересечение: {hist_int:.4f}\n"
+            
+        self.results_display.setText(results)
+        
+    def find_similar_images(self):
         """
-        self.results_label.setText(result_html)
+        Находит топ-3 похожих изображения из выбранной пользователем папки
+        по двум метрикам: косинусное сходство (между эмбеддингами) и SSIM.
+        """
+        if self.image1 is None:
+            self.results_display.setText("Пожалуйста, загрузите изображение 1 для поиска похожих изображений.")
+            return
+
+        folder_path = QFileDialog.getExistingDirectory(self, "Выберите папку с изображениями")
+        if not folder_path:
+            self.results_display.setText("Папка не выбрана.")
+            return
+
+        transform_emb = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor()
+        ])
+        query_tensor = transform_emb(Image.open(self.image1).convert("RGB"))
+        query_embedding = None
+        if self.model is not None:
+            query_embedding = get_embedding(self.model, query_tensor).cpu().numpy()
+
+        query_img_ssim = np.array(Image.open(self.image1).convert("RGB").resize((256, 256))).astype(np.float32)
+
+        vector_results = []  
+        ssim_results = []    
+
+        valid_ext = ('*.png', '*.jpg', '*.jpeg', '*.bmp')
+        candidate_files = []
+        for ext in valid_ext:
+            candidate_files.extend(glob.glob(os.path.join(folder_path, ext)))
+
+        for cand_path in candidate_files:
+            if os.path.abspath(cand_path) == os.path.abspath(self.image1):
+                continue
+
+            if query_embedding is not None:
+                try:
+                    cand_tensor = transform_emb(Image.open(cand_path).convert("RGB"))
+                    cand_embedding = get_embedding(self.model, cand_tensor).cpu().numpy()
+                    cos_sim = cosine_similarity(query_embedding, cand_embedding)
+                except Exception:
+                    cos_sim = -np.inf
+                vector_results.append((cand_path, cos_sim))
+
+            # SSIM
+            try:
+                cand_img_ssim = np.array(Image.open(cand_path).convert("RGB").resize((256, 256))).astype(np.float32)
+                ssim_score = ssim_metric(query_img_ssim, cand_img_ssim)
+            except Exception:
+                ssim_score = -1
+            ssim_results.append((cand_path, ssim_score))
+
+        vector_results.sort(key=lambda x: x[1], reverse=True)
+        ssim_results.sort(key=lambda x: x[1], reverse=True)
+
+        top_vector = vector_results[:3]
+        top_ssim = ssim_results[:3]
+
+        self.clear_layout(self.similar_vector_layout)
+        self.clear_layout(self.similar_ssim_layout)
+
+        for path, sim in top_vector:
+            widget = self.create_result_widget(path, f"Косинусное сходство: {sim:.4f}")
+            self.similar_vector_layout.addWidget(widget)
+
+        for path, score in top_ssim:
+            widget = self.create_result_widget(path, f"SSIM: {score:.4f}")
+            self.similar_ssim_layout.addWidget(widget)
+
+            
+    def create_result_widget(self, image_path, text):
+        """
+        Создает виджет для отображения миниатюры изображения и подписи с метрикой.
+        """
+        container = QWidget()
+        layout = QVBoxLayout()
+        img_label = QLabel()
+        pixmap = QPixmap(image_path)
+        pixmap = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        img_label.setPixmap(pixmap)
+        img_label.setAlignment(Qt.AlignCenter)
+        text_label = QLabel(text)
+        text_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(img_label)
+        layout.addWidget(text_label)
+        container.setLayout(layout)
+        return container
+    
+    def clear_layout(self, layout):
+        """
+        Удаляет все виджеты из заданного layout.
+        """
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = СравнениеИзображений()
+    window = ImageComparator()
     window.show()
     sys.exit(app.exec_())
